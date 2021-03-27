@@ -13,8 +13,9 @@
 #define AMPERAGE    1500     // Power supply amperage in mA
 
 #define NOTE_OFFSET   29     // Offset of first note from left (depends on Piano)
-#define LEDS_PER_NOTE 2      // How many LED are on per key
+#define LEDS_PER_NOTE 1      // How many LED are on per key
 #define LED_INT_STEPS 8      // LED Intensity button steps
+#define MAX_LED_PROGRAM 5
 #define DEBUG         false
 
 CRGB leds[NUM_LEDS];
@@ -115,6 +116,22 @@ void controlChange(byte channel, byte control, byte value) {
   if (DEBUG == true){     Serial.println("Control  - Channel:" + String(channel) + " Control:" + String(control) + " Value:" + String(value)); }
 }
 
+void setProgram(byte program){
+  ledProgram = program;
+  if (DEBUG == true){     Serial.println("Button 1 pressed! Program is " + String(ledProgram)); }
+  // Set LED indication for program
+  fill_solid( leds, NUM_LEDS, CRGB(0,0,0));
+  SetNote(NOTE_OFFSET+ledProgram-1,0xFF0000);
+  FastLED.show();
+}
+void nextProgram(){  
+  if (ledProgram>MAX_LED_PROGRAM){
+    setProgram(1);
+  }
+  else {
+    setProgram(ledProgram + 1);
+  }
+}
 //-------------------------------------------- SETUP ----------------------------------------------//
 
 void setup() {
@@ -147,17 +164,7 @@ void loop() {
       buttonState1 = reading1;
 
       // only toggle the LED if the new button state is HIGH
-      if (buttonState1 == LOW) {
-        ledProgram++;
-        if (ledProgram>6){
-          ledProgram = 1;
-        }
-        if (DEBUG == true){     Serial.println("Button 1 pressed! Program is " + String(ledProgram)); }
-        // Set LED indication for program
-        fill_solid( leds, NUM_LEDS, CRGB(0,0,0));
-        SetNote(NOTE_OFFSET+ledProgram-1,0xFF0000);
-        FastLED.show();
-      }
+      if (buttonState1 == LOW) { nextProgram(); }
     }
   }
 
@@ -210,6 +217,10 @@ void loop() {
     controlChange(rx.byte1 & 0xF,rx.byte2,rx.byte3);
     break;
     
+  case 0xC:
+    setProgram(rx.byte2+1);
+    break;
+
   default:
     if (DEBUG == true){ 
       Serial.print("Unhandled MIDI message: ");
