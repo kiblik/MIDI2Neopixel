@@ -7,21 +7,19 @@
 #define BUTTON_PIN2 2
 #define LED_ACT_PIN 4
 #define LED_PIN     5
-#define NUM_LEDS    144
+#define NUM_LEDS    12
 #define LED_TYPE    WS2812B
 #define COLOR_ORDER GRB
 #define AMPERAGE    1500     // Power supply amperage in mA
 
-#define NOTE_OFFSET   29     // Offset of first note from left (depends on Piano)
-#define LEDS_PER_NOTE 1      // How many LED are on per key
+#define MAX_LED_PROGRAM 2
 #define LED_INT_STEPS 8      // LED Intensity button steps
-#define MAX_LED_PROGRAM 5
-#define DEBUG         false
+#define DEBUG         true
 
 CRGB leds[NUM_LEDS];
 byte color = 0xFFFFFF;
-int ledProgram = 1;
-int ledIntensity = 2;  // default LED brightness
+int program = 0;
+int ledIntensity = LED_INT_STEPS;  // default LED brightness
 int ledBrightness = ceil(255 / LED_INT_STEPS * ledIntensity); // default LED brightness
 int buttonState1;
 int buttonState2;
@@ -31,107 +29,164 @@ unsigned long lastDebounceTime1 = 0;
 unsigned long lastDebounceTime2 = 0;
 unsigned long debounceDelay = 50;
 
-//------------------------------------------- FUNCTIONS ----------------------------------------------//
+//------------------------------------------- MAPPING ----------------------------------------------//
 
-const char* pitch_name(byte pitch) {
-  static const char* names[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-  return names[pitch % 12];
+#define CC_R 0xC // C
+#define CC_G 0xD // S
+#define CC_B 0xE // V
+#define CC_INTENSITY 0xF
+#define CC_POSITION 0x15
+#define CC_SIZE 0x16
+#define CC_FADEIN 0x17
+#define CC_FADEOUT 0x18
+
+typedef struct { 
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+  uint8_t h;
+  uint8_t s;
+  uint8_t v;
+  uint8_t intensity;
+  uint8_t position;
+  uint8_t size;
+  uint8_t fadein;
+  uint8_t fadeout;
+} point_t;
+
+#define NUM_POINTS 16
+
+point_t points[NUM_POINTS];
+
+//------------------------------------------- PROGRAM ----------------------------------------------//
+
+void setProgram(byte newProgram){
+  program = newProgram;
+  if (DEBUG == true){ Serial.println("Program is " + String(program)); }
 }
-
-int pitch_octave(byte pitch) {
-  return (pitch / 12) - 1;
-}
-
-void SetNote(byte pitch, CRGB color) {
-  int b = 0;
-  for (int a = 0; a < LEDS_PER_NOTE; a++) {
-    //if (int(pitch) > 66){b=1;}else{b=0;} // led stripe solder joints compensation
-    leds[(((pitch - NOTE_OFFSET)*LEDS_PER_NOTE)+ a - b)]= color;
+void nextProgram(){  
+  if (program>=MAX_LED_PROGRAM){
+    setProgram(0);
   }
-}
-
-void SetNote2(byte pitch, int hue) {
-  int b = 0;
-  for (int a = 0; a < LEDS_PER_NOTE; a++) {
-    //if (int(pitch) > 66){b=1;}else{b=0;} // led stripe solder joints compensation
-    leds[(((pitch - NOTE_OFFSET)*LEDS_PER_NOTE)+a - b)].setHSV(hue, 255, 255);
+  else {
+    setProgram(program + 1);
   }
+  update();
+}
+//------------------------------------------- Control ----------------------------------------------//
+
+CRGB setPixel(CRGB newLed, point_t point, double fade = 1){
+  if (program == 0) { // RGB
+    newLed.setRGB(
+      round( point.r * fade * point.intensity / 255 ),
+      round( point.g * fade * point.intensity / 255 ),
+      round( point.b * fade * point.intensity / 255 )
+    );
+  } else if (program == 1) { // HSV
+    newLed.setHSV(
+      round( point.h ),
+      round( point.s ),
+      round( point.v * fade * point.intensity / 255 )
+    );
+  } else
+    Serial.println('Unsupported program');
+  return newLed;
 }
 
-void noteOn(byte channel, byte pitch, byte velocity) {
-  if (velocity > 0) {
-    switch (channel) {
+void update(){
+  CRGB newLeds[NUM_LEDS];
 
-      // Left Hand
-    case 144: // Default Channel is 144
-    case 155:
-    case 145 ... 149:
-      if (ledProgram == 1){
-        SetNote(pitch,0x0000FF);
-      }else if (ledProgram == 2){
-        SetNote(pitch,0x00FF00);
-      }else if (ledProgram == 3){
-        SetNote2(pitch,pitch*velocity);
-      }else if (ledProgram == 4){
-        SetNote2(pitch,velocity*2);
-      }else if (ledProgram == 5){
-        SetNote(pitch,0xFFFFFF);
-      }else if (ledProgram == 6){
-        SetNote2(pitch,ceil((pitch-NOTE_OFFSET) * (255/(NUM_LEDS/LEDS_PER_NOTE))));
-      }else{
+  for (int i = 0; i < NUM_LEDS; i++) {
+    newLeds[i] = 0;
+  }
+  for (int point_id = 0; point_id < NUM_POINTS; point_id++){
+    point_t point = points[point_id];
+    if (point.size > 0) {
+      //fade in
+      int j = 0;
+      for (int i = max(0, point.position - point.size/2 - point.fadein ); i < min(NUM_LEDS, point.position - point.size/2 ); i++){
+        j++;
+        newLeds[i] = setPixel( newLeds[i], point, (double) j / (point.fadein+1) );
       }
-      break;
-      
-      // Right Hand
-    case 156:
-    case 150 ... 154:
-      SetNote(pitch,0x00FF00);
-      break;
-      
-    default:
-      SetNote(pitch,0xFFFFFF);
-      break;
+      // core
+      for (int i = max(0, point.position - point.size/2 ); i < min(NUM_LEDS, point.position + (point.size+1)/2 ); i++){
+        newLeds[i] = setPixel( newLeds[i], point );
+      }
+      // fade out
+      j = point.fadeout;
+      for (int i = max(0, point.position + (point.size+1)/2 ); i < min(NUM_LEDS, point.position + (point.size+1)/2 + point.fadeout); i++){
+        newLeds[i] = setPixel( newLeds[i], point, (double) j / (point.fadeout+1) );
+        j--;
+      }
     }
-
-    if (DEBUG == true){     Serial.println("Note ON   - Channel:" + String(channel) + " Pitch:" + String(pitch) + " Note:" + pitch_name(pitch) + String(pitch_octave(pitch)) + " Velocity:" + String(velocity)); }
-  }else{   
-    SetNote(pitch,0x000000); // black
-    if (DEBUG == true){     Serial.println("Note OFF2 - Channel:" + String(channel) + " Pitch:" + String(pitch) + " Note:" + pitch_name(pitch) + String(pitch_octave(pitch)) + " Velocity:" + String(velocity)); }
-  }
-  FastLED.show();
-}
-
-void noteOff(byte channel, byte pitch, byte velocity) {
-  if (ledProgram == 5){
-    fill_rainbow( leds, NUM_LEDS, 0, 5);
-  }else{
-    SetNote(pitch,0x000000); // black
   }
 
-  if (DEBUG == true){     Serial.println("Note OFF  - Channel:" + String(channel) + " Pitch:" + String(pitch) + " Note:" + pitch_name(pitch) + String(pitch_octave(pitch)) + " Velocity:" + String(velocity)); }
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i] = newLeds[i];
+  }
+
   FastLED.show();
 }
 
 void controlChange(byte channel, byte control, byte value) {
-  if (DEBUG == true){     Serial.println("Control  - Channel:" + String(channel) + " Control:" + String(control) + " Value:" + String(value)); }
+
+  switch (control) {
+    case CC_R:
+      points[channel].r = points[channel].h = value * 2;
+      break;
+    case CC_G:
+      points[channel].g = points[channel].s = value * 2;
+      break;
+    case CC_B:
+      points[channel].b = points[channel].v = value * 2;
+      break;
+    case CC_INTENSITY:
+      points[channel].intensity = value * 2;
+      break;
+    case CC_POSITION:
+      points[channel].position = value;
+      break;
+    case CC_SIZE:
+      points[channel].size = value;
+      break;
+    case CC_FADEIN:
+      points[channel].fadein = value;
+      break;
+    case CC_FADEOUT:
+      points[channel].fadeout = value;
+      break;
+    default:
+      Serial.print("Control change: control=");
+      Serial.print(control, HEX);
+      Serial.print(", value=");
+      Serial.print(value, HEX);
+      Serial.print(", channel=");
+      Serial.println(channel);
+      return;
+  }
+  // Serial.print("R/H=");
+  // Serial.print(points[channel].r, HEX);
+  // Serial.print(", G/S=");
+  // Serial.print(points[channel].g, HEX);
+  // Serial.print(", B/V=");
+  // Serial.print(points[channel].b, HEX);
+  // Serial.print(", intensity=");
+  // Serial.print(points[channel].intensity, HEX);
+  // Serial.print(", position=");
+  // Serial.print(points[channel].position, HEX);
+  // Serial.print(", size=");
+  // Serial.print(points[channel].size, HEX);
+  // Serial.print(", fadein=");
+  // Serial.print(points[channel].fadein, HEX);
+  // Serial.print(", fadeout=");
+  // Serial.print(points[channel].fadeout, HEX);
+  // Serial.print(", channel=");
+  // Serial.println(channel);
+
+  update();
+
 }
 
-void setProgram(byte program){
-  ledProgram = program;
-  if (DEBUG == true){     Serial.println("Button 1 pressed! Program is " + String(ledProgram)); }
-  // Set LED indication for program
-  fill_solid( leds, NUM_LEDS, CRGB(0,0,0));
-  SetNote(NOTE_OFFSET+ledProgram-1,0xFF0000);
-  FastLED.show();
-}
-void nextProgram(){  
-  if (ledProgram>MAX_LED_PROGRAM){
-    setProgram(1);
-  }
-  else {
-    setProgram(ledProgram + 1);
-  }
-}
 //-------------------------------------------- SETUP ----------------------------------------------//
 
 void setup() {
@@ -144,7 +199,6 @@ void setup() {
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
   FastLED.setBrightness(ledBrightness);
   fill_solid( leds, NUM_LEDS, CRGB(0,0,0));
-  SetNote(NOTE_OFFSET+ledProgram-1,0xFF0000);
   FastLED.show();
   if (DEBUG == true){ Serial.println("MIDI2Neopixel is ready!"); }
 }
@@ -183,7 +237,6 @@ void loop() {
       // only toggle the LED if the new button state is HIGH
       if (buttonState2 == LOW) {
         ledIntensity++;
-        SetNote(NOTE_OFFSET+ledIntensity-2,0x000000);
         if (ledIntensity>LED_INT_STEPS){
           ledIntensity = 1;
         }
@@ -191,8 +244,6 @@ void loop() {
         ledBrightness = map(ledIntensity, 1, LED_INT_STEPS, 3, 255);
         FastLED.setBrightness(ledBrightness);
         if (DEBUG == true){     Serial.println("Button 2 pressed! Intensity is " + String(ledIntensity) + " and brightness to "+ String(ledBrightness)); }
-        // Set LED indication for program
-        SetNote(NOTE_OFFSET+ledIntensity-1,0x00FF00);
         FastLED.show();
       }
     }
@@ -202,38 +253,39 @@ void loop() {
   midiEventPacket_t rx = MidiUSB.read();
   if (rx.header) {digitalWrite(LED_ACT_PIN, HIGH);}
   switch (rx.header) {
-  case 0:
-    break; //No pending events
+    case 0:
+      break; //No pending events
     
-  case 0x9:
-    noteOn(rx.byte1,rx.byte2,rx.byte3);
-    break;
-    
-  case 0x8:
-    noteOff(rx.byte1,rx.byte2,rx.byte3);
-    break;
-    
-  case 0xB:
-    controlChange(rx.byte1 & 0xF,rx.byte2,rx.byte3);
-    break;
-    
-  case 0xC:
-    setProgram(rx.byte2+1);
-    break;
+    case 0xB:
+      controlChange(
+        rx.byte1 & 0xF,  //channel
+        rx.byte2,        //control
+        rx.byte3         //value
+      );
+      break;
 
-  default:
-    if (DEBUG == true){ 
-      Serial.print("Unhandled MIDI message: ");
-      Serial.print(rx.header, HEX);
-      Serial.print("-");
-      Serial.print(rx.byte1, HEX);
-      Serial.print("-");
-      Serial.print(rx.byte2, HEX);
-      Serial.print("-");
-      Serial.println(rx.byte3, HEX);
-    }
+    case 0xC:
+      setProgram(rx.byte2);
+      break;
+
+    case 0x8: // Note off
+    case 0x9: // Note on
+    case 0xA: // Polyphonic key Pressure
+    case 0xD: // Channel Pressure
+      break;  // we are ignoring all key and pressure messages
+
+    default:
+      if (DEBUG == true){ 
+        Serial.print("Unhandled MIDI message: ");
+        Serial.print(rx.header, HEX);
+        Serial.print("-");
+        Serial.print(rx.byte1, HEX);
+        Serial.print("-");
+        Serial.print(rx.byte2, HEX);
+        Serial.print("-");
+        Serial.println(rx.byte3, HEX);
+      }
   }
-
 
   if (rx.header) {digitalWrite(LED_ACT_PIN, LOW);}
   lastButtonState1 = reading1;
